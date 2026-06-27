@@ -18,6 +18,20 @@ import TemplateEditor from "./components/TemplateEditor";
 import SettingsManager from "./components/SettingsManager";
 import PrintView from "./components/PrintView";
 import { generateId } from "./utils";
+import { 
+  pullDataFromSupabase, 
+  testSupabaseConnection, 
+  supabaseUpsertEmployee, 
+  supabaseDeleteEmployee,
+  supabaseUpsertSuratTugas, 
+  supabaseDeleteSuratTugas, 
+  supabaseUpsertSppd, 
+  supabaseDeleteSppd, 
+  supabaseUpsertTemplate, 
+  supabaseUpsertSettings, 
+  supabaseUpdatePassword,
+  SupabaseSyncStatus
+} from "./supabaseClient";
 
 export default function App() {
   // Session Security State
@@ -31,14 +45,20 @@ export default function App() {
   const [template, setTemplate] = useState<LetterTemplate>(DEFAULT_TEMPLATE);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 
+  // Supabase Database Connection & Sync Status
+  const [dbStatus, setDbStatus] = useState<SupabaseSyncStatus | null>(null);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [syncMessage, setSyncMessage] = useState<string>("");
+
   // UI Navigation states
   const [currentTab, setCurrentTab] = useState<string>("dashboard");
   const [printDocument, setPrintDocument] = useState<{ type: "surattugas" | "sppd"; id: string } | null>(null);
 
-  // Initial Load from LocalStorage
+  // Initial Load from LocalStorage & Supabase Sync
   useEffect(() => {
+    // 1. Load from LocalStorage first to guarantee instant start
     try {
-      // 1. Password
+      // Password
       const storedPassword = localStorage.getItem("siluk_password");
       if (storedPassword) {
         setPassword(storedPassword);
@@ -46,13 +66,13 @@ export default function App() {
         localStorage.setItem("siluk_password", "boyantanjung123");
       }
 
-      // 2. Login Session check (session persistent)
+      // Login Session check
       const sessionAuth = sessionStorage.getItem("siluk_auth");
       if (sessionAuth === "true") {
         setIsLoggedIn(true);
       }
 
-      // 3. Employees
+      // Employees
       const storedEmployees = localStorage.getItem("siluk_employees");
       if (storedEmployees) {
         setEmployees(JSON.parse(storedEmployees));
@@ -61,7 +81,7 @@ export default function App() {
         localStorage.setItem("siluk_employees", JSON.stringify(DEFAULT_EMPLOYEES));
       }
 
-      // 4. Surat Tugas
+      // Surat Tugas
       const storedST = localStorage.getItem("siluk_surat_tugas");
       if (storedST) {
         setSuratTugasList(JSON.parse(storedST));
@@ -70,7 +90,7 @@ export default function App() {
         localStorage.setItem("siluk_surat_tugas", JSON.stringify(DEFAULT_SURAT_TUGAS));
       }
 
-      // 5. SPPD
+      // SPPD
       const storedSPPD = localStorage.getItem("siluk_sppd");
       if (storedSPPD) {
         setSppdList(JSON.parse(storedSPPD));
@@ -79,7 +99,7 @@ export default function App() {
         localStorage.setItem("siluk_sppd", JSON.stringify(DEFAULT_SPPD));
       }
 
-      // 6. Template
+      // Template
       const storedTemplate = localStorage.getItem("siluk_template");
       if (storedTemplate) {
         setTemplate(JSON.parse(storedTemplate));
@@ -88,7 +108,7 @@ export default function App() {
         localStorage.setItem("siluk_template", JSON.stringify(DEFAULT_TEMPLATE));
       }
 
-      // 7. Settings
+      // Settings
       const storedSettings = localStorage.getItem("siluk_settings");
       if (storedSettings) {
         setSettings(JSON.parse(storedSettings));
@@ -97,9 +117,59 @@ export default function App() {
         localStorage.setItem("siluk_settings", JSON.stringify(DEFAULT_SETTINGS));
       }
     } catch (e) {
-      console.error("Gagal memuat database lokal, menggunakan setelan dasar.", e);
+      console.error("Gagal memuat database lokal", e);
     }
+
+    // 2. Perform background sync with Supabase
+    syncSupabaseData();
   }, []);
+
+  const syncSupabaseData = async () => {
+    setIsSyncing(true);
+    setSyncMessage("Sinkronisasi database online...");
+    try {
+      const status = await testSupabaseConnection();
+      setDbStatus(status);
+
+      if (status.connected) {
+        const pulled = await pullDataFromSupabase();
+        
+        if (pulled.password !== null) {
+          setPassword(pulled.password);
+          localStorage.setItem("siluk_password", pulled.password);
+        }
+        if (pulled.employees !== null) {
+          setEmployees(pulled.employees);
+          localStorage.setItem("siluk_employees", JSON.stringify(pulled.employees));
+        }
+        if (pulled.suratTugas !== null) {
+          setSuratTugasList(pulled.suratTugas);
+          localStorage.setItem("siluk_surat_tugas", JSON.stringify(pulled.suratTugas));
+        }
+        if (pulled.sppd !== null) {
+          setSppdList(pulled.sppd);
+          localStorage.setItem("siluk_sppd", JSON.stringify(pulled.sppd));
+        }
+        if (pulled.template !== null) {
+          setTemplate(pulled.template);
+          localStorage.setItem("siluk_template", JSON.stringify(pulled.template));
+        }
+        if (pulled.settings !== null) {
+          setSettings(pulled.settings);
+          localStorage.setItem("siluk_settings", JSON.stringify(pulled.settings));
+        }
+        setSyncMessage("Sinkronisasi Supabase berhasil!");
+      } else {
+        setSyncMessage("Gagal terhubung ke Supabase. Menggunakan data offline.");
+      }
+    } catch (err) {
+      console.error("Gagal sinkronisasi data online:", err);
+      setSyncMessage("Supabase offline.");
+    } finally {
+      setIsSyncing(false);
+      setTimeout(() => setSyncMessage(""), 4000);
+    }
+  };
 
   // Save triggers helper
   const saveEmployees = (data: Employee[]) => {
@@ -117,14 +187,24 @@ export default function App() {
     localStorage.setItem("siluk_sppd", JSON.stringify(data));
   };
 
-  const saveTemplate = (data: LetterTemplate) => {
+  const saveTemplate = async (data: LetterTemplate) => {
     setTemplate(data);
     localStorage.setItem("siluk_template", JSON.stringify(data));
+    try {
+      await supabaseUpsertTemplate(data);
+    } catch (e) {
+      console.warn("Gagal menyimpan template ke Supabase:", e);
+    }
   };
 
-  const saveSettings = (data: AppSettings) => {
+  const saveSettings = async (data: AppSettings) => {
     setSettings(data);
     localStorage.setItem("siluk_settings", JSON.stringify(data));
+    try {
+      await supabaseUpsertSettings(data);
+    } catch (e) {
+      console.warn("Gagal menyimpan settings ke Supabase:", e);
+    }
   };
 
   // Login handler
@@ -138,47 +218,87 @@ export default function App() {
     sessionStorage.removeItem("siluk_auth");
   };
 
-  const handleUpdatePassword = (newPass: string) => {
+  const handleUpdatePassword = async (newPass: string) => {
     setPassword(newPass);
     localStorage.setItem("siluk_password", newPass);
+    try {
+      await supabaseUpdatePassword(newPass);
+    } catch (e) {
+      console.warn("Gagal mengubah password di Supabase:", e);
+    }
   };
 
   // CRUD handlers - Employee
-  const handleAddEmployee = (emp: Employee) => {
+  const handleAddEmployee = async (emp: Employee) => {
     const updated = [...employees, emp];
     saveEmployees(updated);
+    try {
+      await supabaseUpsertEmployee(emp);
+    } catch (e) {
+      console.warn("Gagal menyimpan pegawai ke Supabase:", e);
+    }
   };
 
-  const handleUpdateEmployee = (emp: Employee) => {
+  const handleUpdateEmployee = async (emp: Employee) => {
     const updated = employees.map(e => e.id === emp.id ? emp : e);
     saveEmployees(updated);
+    try {
+      await supabaseUpsertEmployee(emp);
+    } catch (e) {
+      console.warn("Gagal memperbarui pegawai di Supabase:", e);
+    }
   };
 
-  const handleDeleteEmployee = (id: string) => {
+  const handleDeleteEmployee = async (id: string) => {
     const updated = employees.filter(e => e.id !== id);
     saveEmployees(updated);
+    try {
+      await supabaseDeleteEmployee(id);
+    } catch (e) {
+      console.warn("Gagal menghapus pegawai di Supabase:", e);
+    }
   };
 
   // CRUD handlers - Surat Tugas
-  const handleAddSuratTugas = (st: SuratTugas) => {
+  const handleAddSuratTugas = async (st: SuratTugas) => {
     const updated = [st, ...suratTugasList];
     saveSuratTugas(updated);
+    try {
+      await supabaseUpsertSuratTugas(st);
+    } catch (e) {
+      console.warn("Gagal menyimpan surat tugas ke Supabase:", e);
+    }
   };
 
-  const handleDeleteSuratTugas = (id: string) => {
+  const handleDeleteSuratTugas = async (id: string) => {
     const updated = suratTugasList.filter(st => st.id !== id);
     saveSuratTugas(updated);
+    try {
+      await supabaseDeleteSuratTugas(id);
+    } catch (e) {
+      console.warn("Gagal menghapus surat tugas di Supabase:", e);
+    }
   };
 
   // CRUD handlers - SPPD
-  const handleAddSppd = (sppd: SPPD) => {
+  const handleAddSppd = async (sppd: SPPD) => {
     const updated = [sppd, ...sppdList];
     saveSppdList(updated);
+    try {
+      await supabaseUpsertSppd(sppd);
+    } catch (e) {
+      console.warn("Gagal menyimpan SPPD ke Supabase:", e);
+    }
   };
 
-  const handleDeleteSppd = (id: string) => {
+  const handleDeleteSppd = async (id: string) => {
     const updated = sppdList.filter(s => s.id !== id);
     saveSppdList(updated);
+    try {
+      await supabaseDeleteSppd(id);
+    } catch (e) {
+      console.warn("Gagal menghapus SPPD di Supabase:", e);
+    }
   };
 
   // Dynamic 1-Click SPPD generation from Surat Tugas
@@ -310,7 +430,25 @@ export default function App() {
             </svg>
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight">SILUK BERTUAH</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl font-bold tracking-tight">SILUK BERTUAH</h1>
+              {isSyncing && (
+                <span className="px-2 py-0.5 text-[9px] bg-indigo-500 text-white rounded-full animate-pulse font-mono font-bold">
+                  🔄 Sinkronisasi...
+                </span>
+              )}
+              {dbStatus?.connected && !isSyncing && (
+                <span className="px-2 py-0.5 text-[9px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-full font-mono flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                  Supabase Connected
+                </span>
+              )}
+              {dbStatus && !dbStatus.connected && !isSyncing && (
+                <span className="px-2 py-0.5 text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full font-mono">
+                  Mode Lokal (Offline)
+                </span>
+              )}
+            </div>
             <p className="text-[10px] uppercase tracking-widest opacity-80 font-semibold">UPT Puskesmas Boyan Tanjung</p>
           </div>
         </div>
@@ -397,6 +535,10 @@ export default function App() {
                 onUpdatePassword={handleUpdatePassword}
                 onClearAllData={handleClearAllData}
                 onLoadDemoData={handleLoadDemoData}
+                dbStatus={dbStatus}
+                isSyncing={isSyncing}
+                syncMessage={syncMessage}
+                onManualSync={() => syncSupabaseData()}
               />
             )}
           </div>
@@ -407,10 +549,11 @@ export default function App() {
       <footer className="h-8 bg-white border-t border-slate-200 flex items-center justify-between px-6 shrink-0 text-[10px] text-slate-500 font-medium print:hidden z-10">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-            Sistem Online
+            <span className={`w-2 h-2 rounded-full ${dbStatus?.connected ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
+            {dbStatus?.connected ? 'Koneksi Supabase Online' : 'Database Offline (Lokal)'}
           </div>
           <span>Versi 1.2.0-stable</span>
+          {syncMessage && <span className="text-indigo-600 font-bold ml-2 animate-bounce">{syncMessage}</span>}
         </div>
         <div>
           © 2026 SILUK BERTUAH - Pemerintah Kabupaten Kapuas Hulu
